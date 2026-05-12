@@ -133,9 +133,32 @@ jobs:
           fi
 
       - name: Commit and push changes
+        shell: bash
         run: |
           set -e
+
+          echo "Staging all files..."
           git add .
-          TIMESTAMP="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-          git commit -m "Downloaded files on $TIMESTAMP" || echo "Nothing to commit"
-          git push --force
+
+          echo "Checking for changes to commit..."
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            TIMESTAMP="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "Committing changes..."
+            git commit -m "Downloaded files on $TIMESTAMP" || {
+              echo "Warning: git commit failed"
+              true
+            }
+          fi
+
+          echo "Setting authenticated remote URL for push..."
+          git remote set-url origin https://${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+          echo "Pushing changes to origin..."
+          git push --force || {
+            echo "Warning: git push failed"
+            true
+          }
+
+          echo "Commit and push steps completed."
