@@ -1,4 +1,4 @@
-name: Personal File Downloader
+name: Personal File Downloader (RAR)
 
 on:
   workflow_dispatch:
@@ -18,6 +18,9 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y rar
+
       - name: Setup Environment
         run: |
           mkdir -p downloads
@@ -26,65 +29,37 @@ jobs:
 
       - name: Download File
         run: |
-          echo "::group::Step 1: Downloading"
           URL="${{ github.event.inputs.download_url }}"
-          FILENAME=$(basename "$URL" | cut -d'?' -f1) # پاکسازی نام فایل از پارامترهای احتمالی URL
+          # استخراج نام فایل از URL
+          FILENAME=$(basename "$URL" | cut -d'?' -f1)
           
-          echo "شروع دانلود: $URL"
-          
-          # استفاده از curl برای دانلود فایل
           if ! curl -L -f -o "downloads/$FILENAME" "$URL"; then
-            echo "خطا: دانلود با شکست مواجه شد."
+            echo "خطا در دانلود فایل"
             exit 1
           fi
-          
-          echo "دانلود پایان یافت: $FILENAME"
-          echo "::endgroup::"
           
           echo "FILE_PATH=downloads/$FILENAME" >> $GITHUB_ENV
           echo "FILE_NAME=$FILENAME" >> $GITHUB_ENV
 
-      - name: Check Size and Split
+      - name: Compress and Split (RAR)
         run: |
-          echo "::group::Step 2: Checking size and splitting"
+          cd downloads
+          # -v100m: حجم هر پارت 100 مگابایت
+          # -m0: حالت Store (بدون فشرده‌سازی اضافه برای سرعت بالاتر، اگر فایل قبلا فشرده بوده)
+          # برای فشرده‌سازی قوی‌تر از -m5 استفاده کنید
+          rar a -v100m -m0 "${{ env.FILE_NAME }}.rar" "${{ env.FILE_NAME }}"
           
-          FILE_SIZE=$(stat -c%s "${{ env.FILE_PATH }}")
-          # محاسبه محدودیت: 100MB = 100 * 1024 * 1024 bytes
-          LIMIT=$((100 * 1024 * 1024))
-          
-          echo "اندازه فایل: $FILE_SIZE بایت"
-          
-          if [ "$FILE_SIZE" -gt "$LIMIT" ]; then
-            echo "فایل بزرگتر از 100MB است ($FILE_SIZE bytes). در حال پارت‌بندی..."
-            
-            # split -b 100M: تقسیم بر اساس حجم 100 مگابایت
-            # -d: استفاده از پسوند عددی (00, 01, ...)
-            split -b 100M -d "${{ env.FILE_PATH }}" "${{ env.FILE_PATH }}_part_"
-            
-            # حذف فایل اصلی پس از پارت‌بندی
-            rm "${{ env.FILE_PATH }}"
-            echo "عملیات پارت‌بندی با موفقیت انجام شد."
-          else
-            echo "اندازه فایل مجاز است. نیازی به پارت‌بندی نیست."
-          fi
-          echo "::endgroup::"
+          # حذف فایل اصلی پس از ایجاد آرشیوهای RAR
+          rm "${{ env.FILE_NAME }}"
+          cd ..
 
       - name: List Output Files
-        run: |
-          echo "::group::Step 3: Output Listing"
-          echo "لیست فایل‌های موجود در دایرکتوری downloads:"
-          ls -lh downloads/
-          echo "::endgroup::"
+        run: ls -lh downloads/
 
       - name: Commit and Push
         run: |
           git add downloads/
-          
-          # بررسی اینکه آیا تغییری وجود دارد یا خیر
-          if git diff --cached --quiet; then
-            echo "هیچ تغییری برای commit وجود ندارد."
-          else
-            git commit -m "Auto-download: ${{ env.FILE_NAME }}"
+          if ! git diff --cached --quiet; then
+            git commit -m "Auto-download and Split: ${{ env.FILE_NAME }}"
             git push
-            echo "فایل‌ها با موفقیت در ریپازیتوری ذخیره شدند."
           fi
