@@ -131,6 +131,14 @@ jobs:
             echo "Creating ZIP archive..."
             zip -r -s 45m $PASSWORD_FLAG output.zip "$(basename "$WORKDIR")"
           fi
+      - name: Show downloaded files
+        run: |
+          echo "Listing files in working directory:"
+          ls -lh
+          if [[ "$MODE" == "zip" ]]; then
+            echo "Listing files in temporary dir:"
+            ls -lh "$WORKDIR"
+          fi
 
       - name: Commit and push changes
         shell: bash
