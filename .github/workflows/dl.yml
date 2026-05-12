@@ -1,0 +1,183 @@
+name: File Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'لینک‌های دانلود (جدا شده با فاصله)'
+        required: true
+        type: string
+      mode:
+        description: 'حالت دانلود'
+        required: true
+        type: choice
+        options:
+          - normal
+          - zip
+        default: 'normal'
+      password:
+        description: 'رمز عبور ZIP (اختیاری - فقط برای حالت zip)'
+        required: false
+        type: string
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global http.postBuffer 524288000
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 zip curl
+
+      - name: Download files
+        env:
+          MODE: ${{ github.event.inputs.mode }}
+          URLS: ${{ github.event.inputs.urls }}
+          ZIP_PASSWORD: ${{ github.event.inputs.password }}
+        run: |
+          set -e
+
+          DOWNLOAD_DIR="downloads_$(date +%s)"
+          mkdir -p "$DOWNLOAD_DIR"
+
+          sanitize_filename() {
+            echo "$1" | sed 's/[^a-zA-Z0-9._-]/_/g'
+          }
+
+          create_error_file() {
+            local url="$1"
+            local error="$2"
+
+            cat > "$DOWNLOAD_DIR/ERROR_$(date +%s).txt" <<EOF
+          Failed URL:
+          $url
+
+          Error:
+          $error
+
+          Time:
+          $(date)
+          EOF
+          }
+
+          download_with_retry() {
+            local url="$1"
+            local output="$2"
+
+            local retries=3
+            local count=0
+
+            while [ $count -lt $retries ]; do
+              echo "Downloading: $url"
+
+              if aria2c \
+                --max-connection-per-server=16 \
+                --split=16 \
+                --continue=true \
+                --allow-overwrite=true \
+                --auto-file-renaming=false \
+                -d "$DOWNLOAD_DIR" \
+                -o "$output" \
+                "$url"; then
+                return 0
+              fi
+
+              echo "aria2 failed. Trying curl..."
+
+              if curl -L -C - --retry 3 -o "$DOWNLOAD_DIR/$output" "$url"; then
+                if [ -s "$DOWNLOAD_DIR/$output" ]; then
+                  return 0
+                fi
+              fi
+
+              count=$((count + 1))
+
+              echo "Retry $count/$retries"
+              sleep $((count * 5))
+            done
+
+            return 1
+          }
+
+          IFS=' ' read -ra URL_ARRAY <<< "$URLS"
+
+          SUCCESS=0
+          FAILED=0
+
+          for URL in "${URL_ARRAY[@]}"; do
+
+            FILE_NAME=$(basename "${URL%%\?*}")
+            FILE_NAME=$(basename "${FILE_NAME%%\#*}")
+
+            if [ -z "$FILE_NAME" ] || [ "$FILE_NAME" = "/" ]; then
+              FILE_NAME="file_$(date +%s)_$RANDOM"
+            fi
+
+            FILE_NAME=$(sanitize_filename "$FILE_NAME")
+
+            echo "File: $FILE_NAME"
+
+            if download_with_retry "$URL" "$FILE_NAME"; then
+              echo "Downloaded successfully"
+              SUCCESS=$((SUCCESS + 1))
+            else
+              echo "Download failed"
+              FAILED=$((FAILED + 1))
+              create_error_file "$URL" "All retries failed"
+            fi
+          done
+
+          echo "Success: $SUCCESS"
+          echo "Failed: $FAILED"
+
+          if [ "$MODE" = "zip" ]; then
+
+            ZIP_NAME="archive_$(date +%Y%m%d_%H%M%S).zip"
+
+            if [ -n "$ZIP_PASSWORD" ]; then
+              zip -r -P "$ZIP_PASSWORD" "$ZIP_NAME" "$DOWNLOAD_DIR"
+            else
+              zip -r "$ZIP_NAME" "$DOWNLOAD_DIR"
+            fi
+
+            ZIP_SIZE=$(du -m "$ZIP_NAME" | cut -f1)
+
+            if [ "$ZIP_SIZE" -gt 45 ]; then
+              split -b 45M "$ZIP_NAME" "${ZIP_NAME}.part_"
+              rm "$ZIP_NAME"
+            fi
+
+            rm -rf "$DOWNLOAD_DIR"
+          fi
+
+      - name: Commit files
+        run: |
+          git add .
+
+          if git diff --staged --quiet; then
+            echo "No changes"
+          else
+            git commit -m "Downloaded files - $(date)"
+            git push
+          fi
+
+      - name: Cleanup workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          retain_days: 2
+          keep_minimum_runs: 3
